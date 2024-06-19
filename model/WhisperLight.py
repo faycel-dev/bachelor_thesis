@@ -6,7 +6,7 @@ import jiwer as jw
 import torch.nn as nn
 import torch.optim as optim
 from typing import Optional,Tuple
-from ThreeStage import ThreeStage
+from model.ThreeStage import ThreeStage
 from config import Config
 from  compute_err import compeer 
 import re
@@ -81,9 +81,8 @@ class WhisperModel(pl.LightningModule):
 
         return loss
 
-    def validation_step(self, batch, batch_idx):        # Compute the forward pass
+    def validation_step(self, batch, batch_idx):
         output=self.forward(batch)
-#        print(output.keys())
         predictions=output.logits.softmax(-1).argmax(-1)
         labels=batch['labels']
         prediction,label=self.process(labels,predictions)        
@@ -111,12 +110,13 @@ class WhisperModel(pl.LightningModule):
 
 
     def test_step(self, batch, batch_idx):
-        output = self.forward(batch) #,output_hidden_states=True)
+        output = self.forward(batch) 
         input_features=batch['input_features']
         labels=batch['labels']
 
         self.speaker_ids.append(batch["speaker_ids"])
         # used to store the speaker embeddings from all layers
+
         #for layer_idx in range(self.model.config.num_hidden_layers+1):
         #   self.embeddings[layer_idx].append(output.decoder_hidden_states[layer_idx][0,self.speaker_index,:])
  
@@ -125,8 +125,8 @@ class WhisperModel(pl.LightningModule):
 
         self.embeddings.append(output.decoder_hidden_states[-1][0,self.speaker_index,:].tolist())
         _,truth_label,prediction=self.compute_WER(input_features,labels)
-        self.predictions.append(prediction)
-        self.truelbls.append(truth_label)
+        self.hypothesis.append(prediction)
+        self.references.append(truth_label)
 #        test_wer,_=self.compute_WER(input_features,labels)
         loss=output.loss
         #self.log("test_wer",test_wer,on_step=False,on_epoch=True)
@@ -134,6 +134,7 @@ class WhisperModel(pl.LightningModule):
         return loss     
 
     def on_test_epoch_end(self):
+
          speaker_ids = [x.item() for x in self.speaker_ids]
 
 #         for layer_idx in range(self.model.config.num_hidden_layers +1):
@@ -142,25 +143,16 @@ class WhisperModel(pl.LightningModule):
 #              self.log(f"eer_val_layer_{layer_idx}", eer_val)
 
          embeddings = [x for x in self.embeddings]
-#         eer_val = self.metric2(embeddings,speaker_ids)
- #        self.log("AVeer_val",eer_val)
+         eer_val = self.metric2(embeddings,speaker_ids)
+         self.log("val_val",eer_val)
         
-         normpredictions = [v[0] for v in self.predictions]
-         normtruth_labels =[v[0] for v in self.truelbls]
+         normpredictions = [v[0] for v in self.hypothesis]
+         normtruth_labels =[v[0] for v in self.references]
          
          
-#         predictions = [v[0] for v in self.predictions]
-#         truth_labels = [v[0] for v in self.truelbls]
-#         print(predictions)
-#         print(truth_labels)
-#         with open("/vol/csedu-nobackup/project/fharrathi/lightning_logs/file.csv", 'w', newline='', encoding='utf-8') as csvfile:
-#               writer = csv.writer(csvfile)
-#               writer.writerow(['Prediction', 'True Label'])
-#               writer.writerows(zip(predictions, truth_labels))
 
-  #       base_wer=100*self.metric(truth_labels,predictions)
+         # compute WER
          norm_wer=100*self.metric(normtruth_labels,normpredictions)
-  #       self.log("base_wer",base_wer)
          self.log("normalized_wer",norm_wer)
 
 
@@ -172,20 +164,25 @@ class WhisperModel(pl.LightningModule):
  
         """
         computes the word error rate 
-        input batch (dict): A dictionary containing input features and labels for the batch.
+        input batch (dict): A dictionary containing input features and labels .
+        output : word error rate together with truth_labels (references) and  predictions (hypothesis) in form of text 
+                       to analyse the type of error         
         """
         label=labels.clone()
-       # with torch.no_grad():
+        # generate the predicted tokens using generate function
         predected_tokens=self.model.generate(input_features,language='en')
+        # remove speaker ID token and replace it with the padding token
         predected_tokens=torch.where(predected_tokens <= 50363,predected_tokens,self.processor.tokenizer.pad_token_id)
-       
+        #remove the -100  tokens and replace them with the padding token
         label[label == -100] = self.processor.tokenizer.pad_token_id
         label=torch.where(label <= 50363,label,self.processor.tokenizer.pad_token_id)
-
+       
         prediction = self.processor.tokenizer.batch_decode(predected_tokens, skip_special_tokens=True)
         truth_label = self.processor.tokenizer.batch_decode(labels, skip_special_tokens=True)
+
         predictions = [self.processor.tokenizer._normalize(v) for v in prediction ]
         truth_labels = [self.processor.tokenizer._normalize(v) for v in truth_label]
+
         wer_score =100*self.metric(truth_labels,predictions)
         #unormalized_wer=100*self.metric(truth_label,prediction)
         return wer_score,truth_labels,predictions
